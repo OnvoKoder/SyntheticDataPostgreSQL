@@ -1,0 +1,8 @@
+{
+"login":"your login",
+"psw":"your password",
+"host": "your host",
+"schema": "your schema",
+"table": "public.test_data",
+"series": 2000
+}
