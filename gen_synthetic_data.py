@@ -2,93 +2,102 @@ from faker import Faker
 import psycopg2
 import json
 from datetime import datetime
+from typing import Any, Dict
 
-def read_conf()->dict:
+def read_config() -> dict:
+    """read config file"""
     with open('conf.json', 'r', encoding='utf-8') as file:
-        data = json.load(file)
+        data: dict = json.load(file)
     return data
 
-def get_columns(shema:str, table:str) -> []:
-    data:list = []
+def create_connection() -> psycopg2.extensions.connection:
+    """generate connection to postgresql"""
+    return psycopg2.connect(
+        host = conf['host'],
+        dbname = conf['schema'],
+        user = conf['login'],
+        password = conf['psw'],
+        port = '5432'
+    )
+
+def get_columns(schema: str, table: str) -> list:
+    """get meta information of table (column and data type)"""
+    data: list = []
     try:
-        connect = psycopg2.connect(host = conf['host'], dbname = conf['schema'], user =  conf['login'], password =  conf['psw'], port = '5432')
+        connect = create_connection()
         cursor = connect.cursor()
-        query = f"""SELECT column_name,
-                        data_type 
-                    FROM information_schema.columns
-                    WHERE table_name = '{table}'
-                      AND table_schema = '{schema}'
-                """
-        cursor.execute(query)
+        query: str = """
+            SELECT column_name,
+                   data_type 
+              FROM information_schema.columns
+             WHERE table_name = %s
+               AND table_schema = %s
+        """
+        cursor.execute(query, (table, schema))
         data = cursor.fetchall()
         cursor.close()
         connect.close()
         print(f'[{datetime.now()}] Get columns and data type from database')
     except Exception as error:
-        print(error)
+        print(f"[{datetime.now()}] Error: {error}")
     return data
 
-def generate_synthetic_data(columns:list, series:int) -> list:
-    fake = Faker('ru_RU')
-    synthetic_data = []
-    query:str = 'VALUES ('
-    for i in range(0, series):
-        for idx in range(0, len(columns)):
-            if idx == 0:
-                if columns[idx][1] in ['bigint', 'smallint', 'integer']:
-                    query += f'{fake.random.randint(100, 1000)}'
-                elif columns[idx][1] in ['varchar', 'char', 'text']:
-                    query += f"'{fake.word()}'"
-                elif columns[idx][1] in ['timestamp', 'date']:
-                    query += f"'{fake.iso8601()}'"
-                elif columns[idx][1] in ['boolean']:
-                    query += f'{fake.boolean()}'
-                elif columns[idx][1] in ['double', 'float', 'decimal']:
-                    query += f'{fake.pyfloat()}'
-                else:
-                    query += f'NULL'   
-            else:
-                if columns[idx][1] in ['bigint', 'smallint', 'integer']:
-                    query += f',{fake.random.randint(100, 1000)}'
-                elif columns[idx][1] in ['varchar', 'char', 'text']:
-                    query += f",'{fake.word()}'"
-                elif columns[idx][1] in ['timestamp', 'date']:
-                    query += f",'{fake.iso8601()}'"
-                elif columns[idx][1] in ['boolean']:
-                    query += f',{fake.boolean()}'
-                elif columns[idx][1] in ['double', 'float', 'decimal']:
-                    query += f',{fake.pyfloat()}'
-                else:
-                    query += f',NULL'
-        query += ')'
-        synthetic_data.append(query)
-        query = ', ('
-    print(f'[{datetime.now()}] Generated synthetic data')
+def generate_value(fake: Faker, data_type: str) -> Any:
+    """generate a value on depending of data type from handler dictionary"""
+    type_handlers: Dict[str, Any] = {
+        'bigint': lambda: fake.random.randint(100, 10000),
+        'smallint': lambda: fake.random.randint(100, 10000),
+        'integer': lambda: fake.random.randint(100, 10000),
+        'varchar': lambda: fake.word(),
+        'char': lambda: fake.word(),
+        'text': lambda: fake.text(),
+        'timestamp without time zone': lambda: fake.date(),
+        'date': lambda: fake.date(),
+        'boolean': lambda: fake.boolean(),
+        'double': lambda: fake.pyfloat(),
+        'float': lambda: fake.pyfloat(),
+        'decimal': lambda: fake.pyfloat(),
+        'numeric': lambda: fake.pyfloat()
+    }
+    data_type_lower = data_type.lower()
+    handler = type_handlers.get(data_type_lower)
+    return handler() if handler else None
+
+def generate_synthetic_data(columns: list, series: int) -> list:
+    """generate synthetic information for current table"""
+    fake: Faker = Faker('ru_RU')
+    synthetic_data: list = []
+    for _ in range(series):
+        record: list = []
+        for column_name, data_type in columns:
+            value: Any = generate_value(fake, data_type)
+            record.append(value)
+        synthetic_data.append(tuple(record))
+    print(f'[{datetime.now()}] Generated {series} synthetic records')
     return synthetic_data
 
-def insert_data(synthetic_data:list, columns:list):
-    query_insert:str = f'INSERT INTO {conf['table']} ('
-    for idx in range(0, len(columns)):
-        if idx == len(columns) - 1:
-            query_insert += f'{columns[idx][0]})'
-        else:
-            query_insert += f'{columns[idx][0]},'
-    for row in synthetic_data:
-        query_insert += row
+def insert_data(synthetic_data: list, columns: list) -> None:
+    """add records to the database"""
+    if not synthetic_data:
+        return
     try:
-        connect = psycopg2.connect(host = conf['host'], dbname = conf['schema'], user =  conf['login'], password =  conf['psw'], port = '5432')
+        connect = create_connection()
         cursor = connect.cursor()
-        cursor.execute(query_insert)
+        col_names: list = [col[0] for col in columns]
+        placeholders: str = ', '.join(['%s'] * len(columns))
+        query: str = f"INSERT INTO {conf['table']} ({', '.join(col_names)}) VALUES ({placeholders})"
+        cursor.executemany(query, synthetic_data)
         connect.commit()
+        cursor.close()
         connect.close()
-        print(f'[{datetime.now()}] Added synthetic data to the database')
+        print(f'[{datetime.now()}] Added {len(synthetic_data)} records to the database')
     except Exception as error:
-        print(error)
+        print(f"[{datetime.now()}] Error: {error}")
 
-conf = read_conf()
-tmp:list = conf['table'].split('.')
-schema = tmp[0]
-table = tmp[1]
-columns:list = get_columns(schema, table)
-synthetic = generate_synthetic_data(columns, conf['series'])
+conf: dict = read_config()
+tmp: list = conf['table'].split('.')
+schema: str = tmp[0]
+table: str = tmp[1]
+columns: list = get_columns(schema, table)
+synthetic: list = generate_synthetic_data(columns, conf['series'])
 insert_data(synthetic, columns)
